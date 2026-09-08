@@ -2,6 +2,8 @@
 
 Analytics for MCP servers, in PHP.
 
+**[getmcpulse.com](https://getmcpulse.com)** · [Docs](https://docs.getmcpulse.com) · [Dashboard](https://app.getmcpulse.com)
+
 ```php
 use MCPulse\MCPulse;
 use MCPulse\Options;

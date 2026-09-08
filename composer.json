@@ -3,14 +3,19 @@
   "description": "Analytics for MCP servers. One import, one wrap.",
   "type": "library",
   "license": "MIT",
-  "keywords": ["mcp", "model-context-protocol", "analytics", "observability", "llm"],
-  "homepage": "https://github.com/getmcpulse/mcpulse-php",
+  "keywords": ["mcp", "model-context-protocol", "mcp-server", "mcp-analytics", "analytics", "observability", "monitoring", "telemetry", "llm-tools"],
+  "homepage": "https://getmcpulse.com",
   "authors": [
     {
       "name": "MCPulse",
       "homepage": "https://github.com/getmcpulse"
     }
   ],
+  "support": {
+    "docs": "https://docs.getmcpulse.com",
+    "issues": "https://github.com/getmcpulse/mcpulse-php/issues",
+    "source": "https://github.com/getmcpulse/mcpulse-php"
+  },
   "require": {
     "php": ">=8.2",
     "ext-json": "*"
