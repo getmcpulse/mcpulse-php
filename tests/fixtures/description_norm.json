@@ -1,0 +1,127 @@
+{
+  "$comment": "Conformance fixtures for MCPulse description_norm. Every MCPulse SDK, in every language, must turn `description` into exactly `normalised` and then into `description_norm` (first 12 lowercase hex of the SHA-256 of the normalised string, UTF-8). Do not edit by hand — see tests/fixtures/generate-description-norm.ts.",
+  "wire_version": 1,
+  "algorithm": "ascii-lower/ascii-split/stopwords/porter/sort/join-space, then sha256 hex12",
+  "fixtures": [
+    {
+      "name": "empty",
+      "description": "",
+      "normalised": "",
+      "description_norm": "e3b0c44298fc"
+    },
+    {
+      "name": "one word",
+      "description": "Search",
+      "normalised": "search",
+      "description_norm": "241932906782"
+    },
+    {
+      "name": "the pair that motivated the normalised hash #1",
+      "description": "Search for threads in the user's mailbox",
+      "normalised": "mailbox search thread user",
+      "description_norm": "e4b08657b65c"
+    },
+    {
+      "name": "the pair that motivated the normalised hash #2",
+      "description": "Search threads in a user's mailbox",
+      "normalised": "mailbox search thread user",
+      "description_norm": "e4b08657b65c"
+    },
+    {
+      "name": "word order does not matter",
+      "description": "mailbox threads search",
+      "normalised": "mailbox search thread",
+      "description_norm": "3bb8d854f959"
+    },
+    {
+      "name": "stopwords are dropped",
+      "description": "the a an and of to for on with by from",
+      "normalised": "",
+      "description_norm": "e3b0c44298fc"
+    },
+    {
+      "name": "a stopword inflection is dropped by its stem",
+      "description": "using used uses use",
+      "normalised": "",
+      "description_norm": "e3b0c44298fc"
+    },
+    {
+      "name": "domain verbs survive",
+      "description": "List the orders",
+      "normalised": "list order",
+      "description_norm": "35a1c059705d"
+    },
+    {
+      "name": "get is not a stopword",
+      "description": "Get the order",
+      "normalised": "get order",
+      "description_norm": "edbbde996093"
+    },
+    {
+      "name": "plurals merge",
+      "description": "screens screening screened screen",
+      "normalised": "screen screen screen screen",
+      "description_norm": "6fb3b092e313"
+    },
+    {
+      "name": "three-letter acronyms survive",
+      "description": "ATS ids api",
+      "normalised": "api ats ids",
+      "description_norm": "a5f938395f9c"
+    },
+    {
+      "name": "punctuation splits",
+      "description": "read-only; write_once. get/set (maybe)",
+      "normalised": "get mayb read set write",
+      "description_norm": "8a866b776ef2"
+    },
+    {
+      "name": "ascii casing only",
+      "description": "SEARCH Search sEaRcH",
+      "normalised": "search search search",
+      "description_norm": "7c161982995b"
+    },
+    {
+      "name": "digits are kept",
+      "description": "Page 2 of 10",
+      "normalised": "10 page",
+      "description_norm": "8d0b014d3a47"
+    },
+    {
+      "name": "non-ascii stays as one token",
+      "description": "Rechercher les fils",
+      "normalised": "fil les recherch",
+      "description_norm": "7b82230b2e8c"
+    },
+    {
+      "name": "cjk is one token per run",
+      "description": "検索 スレッド",
+      "normalised": "スレッド 検索",
+      "description_norm": "1952d0e2ab55"
+    },
+    {
+      "name": "emoji are not separators",
+      "description": "search 🚀 threads",
+      "normalised": "search thread",
+      "description_norm": "7fe9148c7160"
+    },
+    {
+      "name": "tabs and newlines split",
+      "description": "search\tthreads\nin\r\nmailbox",
+      "normalised": "mailbox search thread",
+      "description_norm": "3bb8d854f959"
+    },
+    {
+      "name": "repeated words collapse to repeats, not a set",
+      "description": "order order order",
+      "normalised": "order order order",
+      "description_norm": "f288ee09bee1"
+    },
+    {
+      "name": "a long real description",
+      "description": "Score a resume against a job description for ATS compatibility. Returns keyword match score, missing keywords, section scores, and improvement recommendations.",
+      "normalised": "ats compat descript improv job keyword keyword match miss recommend resum return score score score section",
+      "description_norm": "5042e3ea1e2d"
+    }
+  ]
+}

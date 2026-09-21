@@ -22,9 +22,20 @@ require __DIR__ . '/../src/Hashing.php';
 require __DIR__ . '/../src/Options.php';
 require __DIR__ . '/../src/Sizes.php';
 require __DIR__ . '/../src/Emptiness.php';
+require __DIR__ . '/../src/Stem.php';
+require __DIR__ . '/../src/Describe.php';
+require __DIR__ . '/../src/Policy.php';
+require __DIR__ . '/../src/Version.php';
+require __DIR__ . '/../src/Agree.php';
 require __DIR__ . '/../src/Transport.php';
 require __DIR__ . '/../src/MCPulse.php';
 
+use MCPulse\Agree;
+use MCPulse\Describe;
+use MCPulse\Policy;
+use MCPulse\Stem;
+use MCPulse\Version;
+use MCPulse\AgreementTracker;
 use MCPulse\Canonical;
 use MCPulse\Emptiness;
 use MCPulse\Hashing;
@@ -295,6 +306,324 @@ check('an empty key records nothing', 0, count($recorded));
 
 MCPulse::$sink = null;
 MCPulse::reset();
+
+// ── Cross-tool agreement ─────────────────────────────────────────────────────
+//
+// The failure under test is the one every other metric in this package reports as healthy: two
+// tools return the same underlying field, they disagree, and the calls all succeed with non-empty
+// results and no retries. Nothing else here can see it, so nothing else here can catch a regression
+// in it.
+//
+// Two properties are load-bearing and both are asserted rather than assumed. **Representation must
+// not be a divergence** — 25.22, 25.220 and "25.22" are one number, and the design exists because
+// hashing gets that wrong. And **no value may leave the process**: a verdict that carried the
+// figure would be the third rule broken by the feature written to respect it.
+//
+// These mirror tests/agree.test.ts in the TypeScript SDK. The verdict is a shared wire contract, so
+// a customer running two languages has to get the same answer from both.
+
+$silent = static function (string $message): void {};
+
+$declaration = [
+    'global_liquidity' => [
+        ['tool' => 'getGlobalLiquidity', 'path' => 'globalLiquidity.value_t'],
+        ['tool' => 'getPillars', 'path' => 'pillars.global_liquidity.value'],
+    ],
+];
+
+$trackerFor = static function (?array $decl = null, ?float $window = null, ?float $tolerance = null) use ($declaration, $silent): AgreementTracker {
+    $config = Agree::resolve($decl ?? $declaration, $window, $tolerance, $silent);
+
+    return new AgreementTracker($config, 's_7f2a91', $silent);
+};
+
+// A result shaped the way most servers answer: JSON inside a text part.
+$textPayload = static fn (array $value): array => ['content' => [['type' => 'text', 'text' => json_encode($value)]]];
+
+$observe = static function (AgreementTracker $tracker, string $tool, mixed $result, float $at): array {
+    $out = [];
+    $tracker->observe($tool, $result, $at, static function (array $verdict) use (&$out): void {
+        $out[] = $verdict;
+    });
+
+    return $out;
+};
+
+$tol = Agree::TOLERANCE;
+
+// The whole reason the comparison is in-process and not at the API: each of these hashes
+// differently, so a hash-based check reports three divergences where there is none.
+check('25.22 equals itself', true, Agree::agrees(25.22, 25.22, $tol));
+check('25.22 equals 25.22000', true, Agree::agrees(25.22, 25.22000, $tol));
+check('25.22 equals "25.22"', true, Agree::agrees(25.22, '25.22', $tol));
+check('"25.220" equals 25.22', true, Agree::agrees('25.220', 25.22, $tol));
+
+check('a float inside tolerance agrees', true, Agree::agrees(1000.0, 1000.00001, $tol));
+check('a float outside tolerance does not', false, Agree::agrees(1000.0, 1002.5, $tol));
+
+// A count that is off by one is off by one. Rounding it into agreement would hide the only kind of
+// disagreement a count can have.
+check('integers compare exactly', false, Agree::agrees(1000000, 1000001, $tol));
+check('42 equals "42"', true, Agree::agrees(42, '42', $tol));
+
+check('identical strings agree', true, Agree::agrees('risk-on', 'risk-on', $tol));
+check('case differs, so they differ', false, Agree::agrees('risk-on', 'Risk-On', $tol));
+check('"" is not 0', false, Agree::agrees('', 0, $tol));
+// PHP reads `true` as 1 in almost every numeric context. A flag from one tool must not agree with
+// a count of one from another, which is a mistake only this language and Ruby can make.
+check('a flag is not a count', false, Agree::agrees(true, 1, $tol));
+// A cast would read "12abc" as 12 and agree with a real 12 from the other tool.
+check('a half-numeric string is not a number', false, Agree::agrees('12abc', 12, $tol));
+check('key order is not a divergence', true, Agree::agrees(['a' => 1, 'b' => 2], ['b' => 2, 'a' => 1], $tol));
+
+check('nothing declared is nothing watched', null, Agree::resolve(null, null, null, $silent));
+check('an empty declaration is nothing watched', null, Agree::resolve([], null, null, $silent));
+
+// One tool cannot disagree with itself, so a field named once has no comparison in it.
+check('a field only one tool declares', null, Agree::resolve(
+    ['global_liquidity' => [['tool' => 'getGlobalLiquidity', 'path' => 'globalLiquidity.value_t']]],
+    null,
+    null,
+    $silent,
+));
+
+$tracker = $trackerFor();
+check('one tool alone emits nothing', 0, count($observe(
+    $tracker,
+    'getGlobalLiquidity',
+    $textPayload(['globalLiquidity' => ['value_t' => 25.22]]),
+    1000,
+)));
+
+$verdicts = $observe(
+    $tracker,
+    'getPillars',
+    $textPayload(['pillars' => ['global_liquidity' => ['value' => '25.220']]]),
+    2000,
+);
+check('a verdict is emitted', 1, count($verdicts));
+check('it agrees across representations', true, $verdicts[0]['agreed']);
+check('it names both tools', ['getGlobalLiquidity', 'getPillars'], [$verdicts[0]['tool_a'], $verdicts[0]['tool_b']]);
+check('it carries the window', 300000, $verdicts[0]['window_ms']);
+$keys = array_keys($verdicts[0]);
+sort($keys);
+check('the verdict has exactly these keys', ['agreed', 'checked_at', 'field', 'session_id', 'tool_a', 'tool_b', 'type', 'v', 'window_ms'], $keys);
+
+$tracker = $trackerFor();
+$observe($tracker, 'getGlobalLiquidity', $textPayload(['globalLiquidity' => ['value_t' => 25.22]]), 1000);
+$diverged = $observe($tracker, 'getPillars', $textPayload(['pillars' => ['global_liquidity' => ['value' => 24.01]]]), 2000);
+check('a genuine divergence is reported', false, $diverged[0]['agreed']);
+
+// No value, no difference, no hash of a value.
+$wire = json_encode($diverged);
+check('the verdict leaks no value', false, str_contains($wire, '25.22') || str_contains($wire, '24.01'));
+check('nor the difference', false, str_contains($wire, '1.21'));
+
+// Same declaration, structured output instead of a JSON text part. The author should not have to
+// remember which envelope they used.
+$tracker = $trackerFor();
+$observe($tracker, 'getGlobalLiquidity', ['structuredContent' => ['globalLiquidity' => ['value_t' => 25.22]]], 1000);
+$structured = $observe($tracker, 'getPillars', ['structuredContent' => ['pillars' => ['global_liquidity' => ['value' => 25.22]]]], 2000);
+check('structured output resolves the same paths', true, count($structured) === 1 && $structured[0]['agreed']);
+
+$tracker = $trackerFor([
+    'vix' => [
+        ['tool' => 'getVix', 'path' => 'rows[0].value'],
+        ['tool' => 'getPillars', 'path' => 'pillars.vix.value'],
+    ],
+]);
+$observe($tracker, 'getVix', $textPayload(['rows' => [['value' => 14.2]]]), 1000);
+$indexed = $observe($tracker, 'getPillars', $textPayload(['pillars' => ['vix' => ['value' => 14.2]]]), 2000);
+check('an index in a path resolves', true, count($indexed) === 1 && $indexed[0]['agreed']);
+
+// A low-traffic sibling can leave a field silently wrong for a long time. Silence here is correct,
+// and is also why that case is counted rather than passed over as a clean run.
+$tracker = $trackerFor();
+$observe($tracker, 'getGlobalLiquidity', $textPayload(['globalLiquidity' => ['value_t' => 25.22]]), 1000);
+$alone = $observe($tracker, 'getGlobalLiquidity', $textPayload(['globalLiquidity' => ['value_t' => 99.9]]), 2000);
+check('one tool cannot disagree with itself', 0, count($alone));
+
+// Two observations either side of a refresh are two different figures. Comparing them would report
+// every refresh as a divergence.
+$tracker = $trackerFor(null, 1000);
+$observe($tracker, 'getGlobalLiquidity', $textPayload(['globalLiquidity' => ['value_t' => 25.22]]), 1000);
+$expired = $observe($tracker, 'getPillars', $textPayload(['pillars' => ['global_liquidity' => ['value' => 24.01]]]), 6000);
+check('an expired window emits nothing', 0, count($expired));
+check('the lonely window is counted', 1, $tracker->stats()['alone']['global_liquidity']);
+
+$tracker = $trackerFor(null, 60000);
+$observe($tracker, 'getGlobalLiquidity', $textPayload(['globalLiquidity' => ['value_t' => 25.22]]), 1000);
+$inside = $observe($tracker, 'getPillars', $textPayload(['pillars' => ['global_liquidity' => ['value' => 24.01]]]), 2000);
+check('a shortened window still compares inside itself', 60000, $inside[0]['window_ms']);
+
+// A typo'd declaration produces no verdict rather than a false clean one, and says so where someone
+// can find it.
+$tracker = $trackerFor([
+    'global_liquidity' => [
+        ['tool' => 'getGlobalLiquidity', 'path' => 'globalLiquidity.typo_here'],
+        ['tool' => 'getPillars', 'path' => 'pillars.global_liquidity.value'],
+    ],
+]);
+$observe($tracker, 'getGlobalLiquidity', $textPayload(['globalLiquidity' => ['value_t' => 25.22]]), 1000);
+$missed = $observe($tracker, 'getPillars', $textPayload(['pillars' => ['global_liquidity' => ['value' => 24.01]]]), 2000);
+check('an unresolved path emits nothing', 0, count($missed));
+check('and is counted', 1, $tracker->stats()['unresolved']['global_liquidity|getGlobalLiquidity']);
+
+// Every one of these is wrong in a different way, and none of them may stop a server booting.
+$messy = Agree::resolve([
+    'a' => [],
+    'b' => [['tool' => 'getPillars']],
+    'global_liquidity' => $declaration['global_liquidity'],
+], null, null, $silent);
+check('a malformed declaration keeps the usable part', 2, $messy['site_count']);
+$watched = array_keys($messy['by_tool']);
+sort($watched);
+check('and watches only the two real tools', ['getGlobalLiquidity', 'getPillars'], $watched);
+
+// ─── The stemmer and the normalised description hash ────────────────────────
+//
+// There are ten MCPulse SDKs, and a description hashed in a PHP server has to equal the same
+// description hashed in a Go one — otherwise one tool looks like two the moment a customer runs a
+// polyglot fleet, and the churn timeline fills with changes that never happened.
+//
+// Both halves are pinned by fixtures rather than by prose. Never regenerate either to make a
+// failing check pass: these hashes are in the product's history, and rewriting them rewrites what
+// every stored row means.
+echo "\n── the stemmer matches every other SDK\n";
+
+$stemFixture = json_decode((string) file_get_contents(__DIR__ . '/fixtures/stem.json'), true);
+$wrong = [];
+foreach ($stemFixture['cases'] as $word => $want) {
+    if (Stem::of((string) $word) !== $want) {
+        $wrong[] = (string) $word;
+    }
+}
+check('all 13,160 fixture words agree with scripts/stem.py', [], array_slice($wrong, 0, 5));
+check('the fixture has not shrunk', true, count($stemFixture['cases']) > 13000);
+
+// analyze_job_description: "…what a job posting actually screens on."
+// optimize_resume:         "…so it passes ATS screening."
+check('screens and screening are one word', Stem::of('screening'), Stem::of('screens'));
+check('and that word is screen', 'screen', Stem::of('screening'));
+// Porter reads the trailing s as a plural and returns "at", which is also a stopword — so the
+// default would delete the most diagnostic noun on a resume server rather than sharpen it.
+check('three-letter acronyms survive', 'ats', Stem::of('ats'));
+
+echo "\n── the normalised description hash matches every other SDK\n";
+
+$normFixture = json_decode((string) file_get_contents(__DIR__ . '/fixtures/description_norm.json'), true);
+$normWrong = [];
+$hashWrong = [];
+foreach ($normFixture['fixtures'] as $case) {
+    if (Describe::normalise($case['description']) !== $case['normalised']) {
+        $normWrong[] = $case['name'];
+    }
+    if (Describe::sha256_12($case['normalised']) !== $case['description_norm']) {
+        $hashWrong[] = $case['name'];
+    }
+}
+check('every conformance case normalises identically', [], $normWrong);
+check('and hashes identically', [], $hashWrong);
+
+// The reason a second hash exists at all. Exact hashing calls these two different, and they are not.
+check(
+    'the two descriptions that are one description',
+    Describe::normalise("Search threads in a user's mailbox"),
+    Describe::normalise("Search for threads in the user's mailbox")
+);
+// list and get are content on an MCP server, not filler. Dropping them would converge the two tools
+// most worth telling apart.
+check(
+    'tools that merely share a verb stay apart',
+    false,
+    Describe::normalise('List the orders') === Describe::normalise('Get the order')
+);
+
+echo "\n── fingerprinting separates a wording change from an interface change\n";
+
+$beforePrint = Describe::fingerprint("Search the threads in a user's mailbox.", ['type' => 'object']);
+$afterPrint = Describe::fingerprint("Search threads in the user's mailbox.", ['type' => 'object']);
+check('the schema hash holds', $beforePrint['schema_hash'], $afterPrint['schema_hash']);
+check('the exact hash moves', false, $beforePrint['description_hash'] === $afterPrint['description_hash']);
+// And the normalised hash says the description did not really change, which is what stops a
+// reworded sentence showing up as churn worth investigating.
+check('the normalised hash holds', $beforePrint['description_norm'], $afterPrint['description_norm']);
+
+echo "\n── per-field windows and tolerances\n";
+
+// The design partner's constraint: "a quote 30s old is fine for a chat answer, fatal for a trade."
+$perField = Agree::resolve(
+    ['global_liquidity' => ['sources' => $declaration['global_liquidity'], 'window_ms' => 30000]],
+    300000,
+    null,
+    $silent
+);
+check('a field keeps its own window', 30000, $perField['bars']['global_liquidity'][0]);
+check('and the default is untouched', 300000, $perField['window_ms']);
+// Falls back one at a time: its own window, the default tolerance.
+check('overrides fall back one at a time', Agree::TOLERANCE, $perField['bars']['global_liquidity'][1]);
+
+$bare = Agree::resolve(['global_liquidity' => $declaration['global_liquidity']], 42000, null, $silent);
+check('the bare-list form still works', 42000, $bare['bars']['global_liquidity'][0]);
+
+echo "\n── a declared policy is carried, and an empty one is not\n";
+
+check(
+    'a declared precondition survives',
+    ['requires_authorization' => true, 'requires_verified_identity' => false],
+    Policy::forTool(['delete_account' => ['requiresAuthorization' => true]], 'delete_account')
+);
+check(
+    'the snake_case spelling works too',
+    ['requires_authorization' => false, 'requires_verified_identity' => true],
+    Policy::forTool(['wire' => ['requires_verified_identity' => true]], 'wire')
+);
+// A declaration that requires nothing is a mistake rather than a request to exclude the tool, and
+// treating it as a policy would silently drop the tool out of every discoverability figure.
+check('a policy that requires nothing is not a policy', null, Policy::forTool(['x' => []], 'x'));
+check('an undeclared tool has no policy', null, Policy::forTool([], 'x'));
+
+echo "\n── the transport vocabulary is small and fixed\n";
+check('stdio', 'stdio', Version::transportOf('StdioServerTransport'));
+check('streamable http', 'http', Version::transportOf('StreamableHttpTransport'));
+check('sse', 'sse', Version::transportOf('SseServerTransport'));
+// Anything unrecognised is excluded from the wire-mapping table rather than guessed at.
+check('anything else is unknown', 'unknown', Version::transportOf('SomethingNew'));
+check('and so is nothing', 'unknown', Version::transportOf(null));
+
+echo "\n── the agreement declaration on the wire\n";
+
+// Coverage without this can only say which tools produced a verdict. A field whose path is mistyped
+// never produces one, so it reads as a check that keeps passing — the failure mode worth catching.
+$declaredConfig = Agree::resolve(['global_liquidity' => $declaration['global_liquidity']], null, null, $silent);
+check(
+    'the declaration is rebuilt from what is watched',
+    [['field' => 'global_liquidity', 'tools' => ['getGlobalLiquidity', 'getPillars']]],
+    $declaredConfig['declared']
+);
+
+// A field naming one tool watches nothing, so reporting it would overstate what is checked.
+$lonely = Agree::resolve(
+    [
+        'lonely' => [['tool' => 'getGlobalLiquidity', 'path' => 'a.b']],
+        'global_liquidity' => $declaration['global_liquidity'],
+    ],
+    null,
+    null,
+    $silent
+);
+check(
+    'a field only one tool declares is not reported as covered',
+    ['global_liquidity'],
+    array_column($lonely['declared'], 'field')
+);
+
+// A path describes the shape of a customer's results. Coverage does not need it.
+check(
+    'the declaration carries no paths',
+    false,
+    str_contains(json_encode($declaredConfig['declared']), 'globalLiquidity.value_t')
+);
 
 printf("\n%d passed, %d failed\n", $passed, $failed);
 exit($failed > 0 ? 1 : 0);

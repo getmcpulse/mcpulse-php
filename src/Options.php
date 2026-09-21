@@ -31,11 +31,40 @@ final class Options
     public readonly string $key;
     public readonly string $endpoint;
 
+    /**
+     * `$agree` is opt-in and off by default: the fields more than one tool returns, and where each
+     * returns them. Two tools that disagree about the same figure leave every other metric here
+     * green, so it is the one failure nothing else can see. See {@see Agree}.
+     *
+     * @param  null|array<string, list<array{tool?: string, path?: string}>>  $agree
+     */
     public function __construct(
         string $key,
         ?string $endpoint = null,
         public readonly bool $enabled = true,
         public readonly bool $debug = false,
+        public readonly ?array $agree = null,
+        public readonly ?float $agreeWindowMs = null,
+        public readonly ?float $agreeTolerance = null,
+        /**
+         * Opt-in: tools a client will refuse to offer until some precondition holds.
+         *
+         * A tool declared here is excluded from every discoverability metric. Without it, a model
+         * correctly declining to call a dangerous tool reads as poor discoverability, and the
+         * advice that follows makes the server less safe. See {@see Policy}.
+         *
+         * @var array<string, mixed>|null
+         */
+        public readonly ?array $policy = null,
+        /**
+         * How this server is being served: `stdio`, `http` or `sse`.
+         *
+         * The PHP MCP SDKs do not expose the transport from a server object, so it is declared
+         * rather than guessed: a row that says `stdio` when it was SSE is worse than no row,
+         * because the wire-mapping table would be applied to it confidently and wrongly. Left
+         * unset, the row says `unknown` and is excluded from that table.
+         */
+        public readonly ?string $transport = null,
     ) {
         $this->key = trim($key);
         $target = ($endpoint === null || trim($endpoint) === '') ? self::DEFAULT_ENDPOINT : $endpoint;
@@ -56,6 +85,16 @@ final class Options
     public function streamKey(): string
     {
         return $this->endpoint . '|' . $this->key;
+    }
+
+    /** Writes a line to stderr when `debug` is on, and nothing otherwise. */
+    public function log(string $message): void
+    {
+        if ($this->debug) {
+            // stderr, never stdout: stdout is the transport for a stdio MCP server, and a stray
+            // line there corrupts the protocol.
+            file_put_contents('php://stderr', "[mcpulse] {$message}\n");
+        }
     }
 }
 

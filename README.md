@@ -37,9 +37,77 @@ burden with no upside for a single POST.
 | `endpoint` | `https://api.getmcpulse.com` | Point at a local API while developing |
 | `enabled` | `true` | `false` makes everything a no-op — useful in tests and CI |
 | `debug` | `false` | Log what is sent, and why a send failed, to **stderr** |
+| `agree` | off | Fields that more than one tool returns. See below |
+| `agreeWindowMs` | `300000` | How long a value stays comparable |
+| `agreeTolerance` | `0.0001` | Relative, for floats |
 
 An empty key turns it off, so a server started without its key configured is
 silent rather than a source of 401s on every flush.
+
+### Cross-tool agreement
+
+Opt-in, and it catches the failure every other metric here calls healthy.
+
+Two tools return the same underlying field. A stale cache key, or a versioned key
+a cron did not follow, and they disagree for hours. Every number stays green the
+whole time — the calls succeed, the results are non-empty, there are no retries
+and the latency is fine. Callers get two different answers to one question and
+nothing reports it.
+
+Name the value once, and say where each tool returns it:
+
+```php
+MCPulse::configure(new Options(
+    key: getenv('MCPULSE_KEY') ?: '',
+    agree: [
+        'global_liquidity' => [
+            ['tool' => 'getGlobalLiquidity', 'path' => 'globalLiquidity.value_t'],
+            ['tool' => 'getPillars', 'path' => 'pillars.global_liquidity.value'],
+        ],
+    ],
+    agreeWindowMs: 300_000,
+));
+```
+
+A map rather than a list of field names, because the same value routinely ships
+under a different name and a different shape in each tool — which is most of why
+two copies of it drift apart without anyone noticing.
+
+**The comparison happens in your process, and only the verdict is sent.**
+
+```json
+{
+  "v": 1, "type": "agreement", "session_id": "s_7f2a91",
+  "field": "global_liquidity",
+  "tool_a": "getGlobalLiquidity", "tool_b": "getPillars",
+  "agreed": false, "checked_at": "2026-09-11T14:22:31Z", "window_ms": 300000
+}
+```
+
+No value, no difference, no hash of a value. Hashing could not work anyway:
+`25.22`, `25.220` and `"25.22"` are the same number and three different hashes,
+so a server-side check would report every representation change as a divergence
+forever.
+
+**PHP has a limit here the other SDKs do not**, and it is the same one behind
+"One known gap" below: under FPM the process ends with the request, so two tools
+called in two requests are two processes and there is nothing to compare. The
+check is worth having on a long-lived worker — Swoole, RoadRunner, a stdio
+server — and does nothing useful under FPM.
+
+Three more things worth knowing:
+
+- **`agreeWindowMs` must be shorter than your data's refresh interval.** A window
+  that outlives a refresh compares a figure against its own predecessor and calls
+  a legitimate change a divergence.
+- **Integers and strings are compared exactly.** The tolerance is relative and
+  applies to floats only — a count that is off by one is off by one. `"12abc"` is
+  not a number either, whatever a cast would say.
+- **The path is searched in `structuredContent`, in the JSON of a text content
+  part, and in the result itself**, so it does not matter which envelope your tool
+  returns. Run once with `debug: true`: a path that never resolves says so there,
+  which is how a typo'd declaration shows up as something other than a passing
+  check.
 
 ## How "never block" works in PHP
 

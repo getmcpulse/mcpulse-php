@@ -33,6 +33,16 @@ final class MCPulse
     private static bool $startupSent = false;
     private static bool $shutdownRegistered = false;
 
+    /**
+     * The cross-tool check, when `configure` was given a declaration, and null when it was not —
+     * which is the ordinary case.
+     *
+     * Static beside the session id for the same reason it is: a tracker rebuilt per call would
+     * only ever see one tool and could never compare anything with anything. The first declaration
+     * wins, like the session.
+     */
+    private static ?AgreementTracker $agreement = null;
+
     /** @var list<array<string, mixed>> */
     private static array $pending = [];
 
@@ -66,6 +76,18 @@ final class MCPulse
 
             self::$options = $options;
             self::$sessionId ??= Hashing::newSessionId();
+
+            if (self::$agreement === null) {
+                $config = Agree::resolve(
+                    $options->agree,
+                    $options->agreeWindowMs,
+                    $options->agreeTolerance,
+                    static fn (string $message) => self::log($message, $options),
+                );
+                if ($config !== null) {
+                    self::$agreement = new AgreementTracker($config, self::$sessionId, static fn (string $message) => self::log($message, $options));
+                }
+            }
 
             if (!self::$shutdownRegistered) {
                 // Registered once for the process. Under FPM this runs after the response has been
@@ -157,7 +179,11 @@ final class MCPulse
      *
      * @param iterable<mixed> $tools
      */
-    public static function recordStartup(iterable $tools, ?string $clientName = null): void
+    public static function recordStartup(
+        iterable $tools,
+        ?string $clientName = null,
+        ?string $protocolVersion = null
+    ): void
     {
         try {
             if (self::$options === null || self::$startupSent) {
@@ -175,22 +201,65 @@ final class MCPulse
                 if (!is_string($name) || $name === '') {
                     continue;
                 }
+                // Fingerprinted from the same object the byte count is taken from — the tool list
+                // as the client will actually see it, after the SDK has converted whatever the
+                // author declared. Hashing the PHP object instead would report churn every time a
+                // refactor changed the declaration without changing the wire.
+                $description = Emptiness::member($tool, 'description');
                 $described[] = [
                     'name' => substr($name, 0, Options::MAX_TOOL_NAME),
                     'schema_bytes' => self::measure($tool),
-                ];
+                ] + Describe::fingerprint(
+                    is_string($description) ? $description : null,
+                    self::inputSchema($tool)
+                ) + ['policy' => Policy::forTool(self::$options->policy, $name)];
             }
+
+            $withPolicy = count(array_filter($described, static fn ($tool) => $tool['policy'] !== null));
+            $transport = self::$options->transport ?? 'unknown';
 
             self::emit([
                 'v' => 1,
                 'type' => 'startup',
                 'session_id' => self::$sessionId,
                 'client_name' => self::$clientName,
+                'sdk' => Version::SDK_NAME . '@' . Version::sdk(),
+                // Inputs to the wire-mapping table: how a thrown exception and a returned isError
+                // actually reach the client is a property of the MCP SDK version and the transport,
+                // not of this server. Null means it could not be determined, and the table is not
+                // applied rather than guessed at.
+                'mcp_sdk_version' => Version::mcpSdk(),
+                'transport' => $transport,
+                'protocol_version' => $protocolVersion,
+                // Read off the tracker rather than the options, so what is reported as declared is
+                // what actually resolved. Omitted entirely when nothing was declared — an empty
+                // array would read as "declared nothing and it never fired".
+                ...(self::$agreement !== null ? ['agree_declared' => self::$agreement->declared()] : []),
                 'tools' => $described,
             ]);
+            self::$options->log(
+                "startup: " . count($described) . " tools, client " . self::$clientName
+                . ", transport {$transport}"
+                . ($withPolicy > 0 ? ", {$withPolicy} with a declared policy" : '')
+            );
         } catch (\Throwable) {
             // A startup payload is worth nothing next to the server that would have failed for it.
         }
+    }
+
+    /**
+     * The tool's JSON Schema, under whichever name this SDK version uses.
+     */
+    private static function inputSchema(mixed $tool): mixed
+    {
+        foreach (['inputSchema', 'input_schema', 'parameters'] as $name) {
+            $schema = Emptiness::member($tool, $name);
+            if ($schema !== null) {
+                return $schema;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -242,6 +311,22 @@ final class MCPulse
             'is_empty' => $outcome === Outcome::Ok && Emptiness::isEmptyResult($result),
             'args_hash' => Hashing::argsHash($arguments),
         ]);
+
+        // Only a call that returned something has a value worth comparing: a crash has no result,
+        // and an error result is a message rather than the figure the declaration named.
+        // Synchronous and cheap, and it runs after the handler has already answered.
+        if ($outcome === Outcome::Ok && self::$agreement !== null) {
+            try {
+                self::$agreement->observe(
+                    substr($name, 0, Options::MAX_TOOL_NAME),
+                    $result,
+                    null,
+                    static fn (array $verdict) => self::emit($verdict),
+                );
+            } catch (\Throwable) {
+                // A divergence check must never be the reason a tool call fails.
+            }
+        }
     }
 
     /**
@@ -320,6 +405,7 @@ final class MCPulse
         self::$sessionId = null;
         self::$clientName = 'unknown';
         self::$startupSent = false;
+        self::$agreement = null;
         self::$pending = [];
     }
 }
